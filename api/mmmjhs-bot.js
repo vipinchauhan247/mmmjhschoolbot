@@ -38,8 +38,56 @@ const SHEET_HEADERS = {
   ]
 };
 
+const SHEET_ALIASES = {
+  Students: ['Students', 'Students Record', 'Student Record', 'Student Records'],
+  Registrations: ['Registrations', 'Registration'],
+  Fee_Due_Messages: ['Fee_Due_Messages', 'Fee Due Messages'],
+  Fee_Receipt_Messages: ['Fee_Receipt_Messages', 'Fee Receipt Messages', 'Fee_Receipts'],
+  School_Messages: ['School_Messages', 'School Messages'],
+  Exam_Schedule_Messages: ['Exam_Schedule_Messages', 'Exam Schedule Messages'],
+  Bot_Events: ['Bot_Events', 'Bot Events']
+};
+
+const HEADER_ALIASES = {
+  AdmissionNo: ['AdmissionNo', 'Admission No', 'Admission Number', 'AdmissionNo.', 'Adm No', 'Adm No.', 'dmission Numb'],
+  StudentName: ['StudentName', 'Student Name', 'Name'],
+  Class: ['Class', 'Class & Section', 'Class Sec'],
+  Section: ['Section', 'Sec'],
+  ParentName: ['ParentName', 'Parent Name', 'Father Name', "Father's Name", 'FatherName'],
+  ParentPhone: ['ParentPhone', 'Parent Phone', 'Mobile', 'Phone', 'Parent Mobile', 'Contact'],
+  NfcUid: ['NfcUid', 'NFC UID', 'NFC ID', 'Nfc ID', 'NFC Card UID'],
+  SchoolBotChatId: ['SchoolBotChatId', 'School Bot Chat ID', 'Parent Telegram Chat ID', 'Telegram Chat ID', 'TelegramChatId'],
+  TelegramUserName: ['TelegramUserName', 'Telegram User Name', 'Telegram Username', 'Username'],
+  Status: ['Status'],
+  DueMonths: ['DueMonths', 'Due Months'],
+  TuitionDue: ['TuitionDue', 'Tuition Due'],
+  ExamFeeDue: ['ExamFeeDue', 'Exam Fee Due'],
+  ComputerFeeDue: ['ComputerFeeDue', 'Computer Fee Due'],
+  AnnualFeeDue: ['AnnualFeeDue', 'Annual Fee Due'],
+  PreviousSessionDue: ['PreviousSessionDue', 'Previous Session Due'],
+  TotalDue: ['TotalDue', 'Total Due']
+};
+
 function getEnv(name) {
   return process.env[name] || '';
+}
+
+function firstEnv(names) {
+  for (const name of names) {
+    const value = getEnv(name);
+    if (value) return value;
+  }
+  return '';
+}
+
+function botToken() {
+  const token = firstEnv(['MMMJHS_BOT_TOKEN', 'BOT_TOKEN']);
+  if (!token) throw new Error('Bot token is missing. Add MMMJHS_BOT_TOKEN or BOT_TOKEN in Render Environment.');
+  return token;
+}
+
+function adminSecret() {
+  return firstEnv(['BOT_ADMIN_SECRET', 'BOT_SECRET']);
 }
 
 function json(res, status, body) {
@@ -49,8 +97,51 @@ function json(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
+function normalizeHeaderName(header) {
+  const clean = String(header || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  for (const [canonical, aliases] of Object.entries(HEADER_ALIASES)) {
+    if (aliases.some(alias => String(alias).trim().toLowerCase().replace(/[^a-z0-9]/g, '') === clean)) return canonical;
+  }
+  return String(header || '').trim();
+}
+
 function base64url(value) {
   return Buffer.from(value).toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+}
+
+function requestUrlJson(method, rawUrl, body, headers = {}, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(rawUrl);
+    const payload = body ? JSON.stringify(body) : '';
+    const req = https.request({
+      method,
+      hostname: url.hostname,
+      path: `${url.pathname}${url.search}`,
+      headers: {
+        ...headers,
+        ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {})
+      }
+    }, response => {
+      if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location && redirects < 5) {
+        response.resume();
+        const nextUrl = new URL(response.headers.location, rawUrl).toString();
+        requestUrlJson(method, nextUrl, body, headers, redirects + 1).then(resolve).catch(reject);
+        return;
+      }
+      let data = '';
+      response.on('data', chunk => data += chunk);
+      response.on('end', () => {
+        try {
+          resolve(data ? JSON.parse(data) : {});
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
 }
 
 function requestJson(method, hostname, path, body, headers = {}) {
@@ -148,6 +239,18 @@ async function sheetsRequest(method, path, body) {
   return requestJson(method, 'sheets.googleapis.com', path, body, { Authorization: `Bearer ${token}` });
 }
 
+async function scriptRequest(action, payload = {}) {
+  const scriptUrl = getEnv('GOOGLE_SCRIPT_URL');
+  if (!scriptUrl) throw new Error('GOOGLE_SCRIPT_URL is missing.');
+  const result = await requestUrlJson('POST', scriptUrl, { action, ...payload });
+  if (!result.ok) throw new Error(result.error || `Google Script action failed: ${action}`);
+  return result;
+}
+
+function useGoogleScript() {
+  return !!getEnv('GOOGLE_SCRIPT_URL') && (!getEnv('GOOGLE_SERVICE_ACCOUNT_EMAIL') || !getEnv('GOOGLE_PRIVATE_KEY'));
+}
+
 function sheetId() {
   const id = getEnv('GOOGLE_SHEET_ID');
   if (!id) throw new Error('GOOGLE_SHEET_ID is missing.');
@@ -165,10 +268,26 @@ function rowFromMap(headers, row) {
 }
 
 async function getRows(tab) {
+  if (useGoogleScript()) {
+    const result = await scriptRequest('getRows', { tab, aliases: SHEET_ALIASES[tab] || [tab], defaultHeaders: SHEET_HEADERS[tab] || [] });
+    const values = result.values || [];
+    const rawHeaders = result.headers && result.headers.length ? result.headers : (values[0] || SHEET_HEADERS[tab] || []);
+    const headers = rawHeaders.map(normalizeHeaderName);
+    const bodyRows = values.length ? values.slice(1) : (result.rows || []);
+    return {
+      isEmpty: !values.length && !bodyRows.length,
+      headers,
+      rows: bodyRows.filter(row => Array.isArray(row) && row.some(Boolean)).map((row, index) => ({
+        index: Number(row.__rowIndex || result.startRow || 2) + index,
+        values: row,
+        data: asMap(headers, row)
+      }))
+    };
+  }
   const encoded = encodeURIComponent(`${tab}!A:Z`);
   const result = await sheetsRequest('GET', `/v4/spreadsheets/${sheetId()}/values/${encoded}`, null);
   const values = result.values || [];
-  const headers = values[0] && values[0].length ? values[0] : SHEET_HEADERS[tab];
+  const headers = (values[0] && values[0].length ? values[0] : SHEET_HEADERS[tab]).map(normalizeHeaderName);
   return {
     isEmpty: values.length === 0,
     headers,
@@ -177,6 +296,10 @@ async function getRows(tab) {
 }
 
 async function updateRow(tab, rowIndex, headers, data) {
+  if (useGoogleScript()) {
+    await scriptRequest('updateRow', { tab, aliases: SHEET_ALIASES[tab] || [tab], rowIndex, headers, values: rowFromMap(headers, data) });
+    return;
+  }
   const range = encodeURIComponent(`${tab}!A${rowIndex}:Z${rowIndex}`);
   await sheetsRequest('PUT', `/v4/spreadsheets/${sheetId()}/values/${range}?valueInputOption=USER_ENTERED`, {
     values: [rowFromMap(headers, data)]
@@ -184,6 +307,10 @@ async function updateRow(tab, rowIndex, headers, data) {
 }
 
 async function appendRow(tab, values) {
+  if (useGoogleScript()) {
+    await scriptRequest('appendRow', { tab, aliases: SHEET_ALIASES[tab] || [tab], headers: SHEET_HEADERS[tab] || [], values });
+    return;
+  }
   const range = encodeURIComponent(`${tab}!A:Z`);
   await sheetsRequest('POST', `/v4/spreadsheets/${sheetId()}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
     values: [values]
@@ -238,8 +365,7 @@ Attendance card commands are handled by the separate attendance bot only.`;
 }
 
 async function sendTelegram(chatId, text) {
-  const token = getEnv('MMMJHS_BOT_TOKEN');
-  if (!token) throw new Error('MMMJHS_BOT_TOKEN is missing.');
+  const token = botToken();
   return requestJson('POST', 'api.telegram.org', `/bot${token}/sendMessage`, {
     chat_id: chatId,
     text: `${SCHOOL_NAME}\n\n${text}`
@@ -427,7 +553,7 @@ async function handleTelegramUpdate(update) {
 
   if (['register', 'link', 'start'].includes(effectiveCommand)) return handleRegister(chatId, from, admissionNo, effectiveCommand);
   if (effectiveCommand === 'status') return handleStatus(chatId, from, admissionNo);
-  if (effectiveCommand === 'fees') return handleFees(chatId, admissionNo);
+  if (['fees', 'fee', 'dues', 'due'].includes(effectiveCommand)) return handleFees(chatId, admissionNo);
   if (['whoami', 'mychildren', 'myward'].includes(effectiveCommand)) return handleWhoAmI(chatId, from);
 
   await sendTelegram(chatId, helpMessage(getTelegramName(from)));
@@ -525,12 +651,12 @@ async function logErpMessage(req, res) {
 }
 
 async function setupWebhook(req, res) {
-  const secret = getEnv('BOT_ADMIN_SECRET');
+  const secret = adminSecret();
   if (secret && req.query.secret !== secret) return json(res, 403, { ok: false, error: 'Forbidden' });
   const host = req.headers['x-forwarded-host'] || req.headers.host;
   const proto = req.headers['x-forwarded-proto'] || 'https';
   const webhookUrl = `${proto}://${host}/api/mmmjhs-bot`;
-  const token = getEnv('MMMJHS_BOT_TOKEN');
+  const token = botToken();
   const result = await requestJson('POST', 'api.telegram.org', `/bot${token}/setWebhook`, {
     url: webhookUrl,
     drop_pending_updates: false
@@ -539,8 +665,12 @@ async function setupWebhook(req, res) {
 }
 
 async function setupSheet(req, res) {
-  const secret = getEnv('BOT_ADMIN_SECRET');
+  const secret = adminSecret();
   if (secret && req.query.secret !== secret) return json(res, 403, { ok: false, error: 'Forbidden' });
+  if (useGoogleScript()) {
+    const result = await scriptRequest('setupSheet', { sheetHeaders: SHEET_HEADERS, sheetAliases: SHEET_ALIASES });
+    return json(res, 200, { ok: true, mode: 'google_script', result });
+  }
   const metadata = await sheetsRequest('GET', `/v4/spreadsheets/${sheetId()}`, null);
   const existingTitles = new Set((metadata.sheets || []).map(s => s.properties.title));
   const requests = Object.keys(SHEET_HEADERS)
