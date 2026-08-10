@@ -121,6 +121,31 @@ function base64url(value) {
   return Buffer.from(value).toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
 }
 
+function parseScriptResponseText(text) {
+  if (/^\s*</.test(text || '')) {
+    throw new Error('GOOGLE_SCRIPT_URL returned an HTML page, not JSON. Use the Apps Script Web App URL ending in /exec and set access to Anyone.');
+  }
+  return text ? JSON.parse(text) : {};
+}
+
+/** Google Apps Script /exec POST needs fetch redirect following (https.request often gets HTML). */
+async function requestScriptJson(method, scriptUrl, body) {
+  const init = {
+    method: method || 'GET',
+    headers: {
+      Accept: 'application/json,text/plain,*/*',
+      'User-Agent': 'MMMJHSchoolBot/1.0'
+    },
+    redirect: 'follow'
+  };
+  if (body) {
+    init.headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(body);
+  }
+  const response = await fetch(scriptUrl, init);
+  return parseScriptResponseText(await response.text());
+}
+
 function requestUrlJson(method, rawUrl, body, headers = {}, redirects = 0) {
   return new Promise((resolve, reject) => {
     const url = new URL(rawUrl);
@@ -226,7 +251,7 @@ async function getAccessToken() {
   if (cachedAccessToken && Date.now() < cachedAccessTokenExpiry - 60000) return cachedAccessToken;
 
   const clientEmail = getEnv('GOOGLE_SERVICE_ACCOUNT_EMAIL');
-  const privateKey = getEnv('GOOGLE_PRIVATE_KEY').replace(/\\n/g, '\n');
+  const privateKey = String(getEnv('GOOGLE_PRIVATE_KEY') || '').replace(/\\n/g, '\n');
   if (!clientEmail || !privateKey) throw new Error('Google service account env vars are missing.');
 
   const now = Math.floor(Date.now() / 1000);
@@ -261,7 +286,7 @@ async function sheetsRequest(method, path, body) {
 async function scriptRequest(action, payload = {}) {
   const scriptUrl = getScriptUrl();
   if (!scriptUrl) throw new Error('GOOGLE_SCRIPT_URL is missing.');
-  const result = await requestUrlJson('POST', scriptUrl, { action, ...payload });
+  const result = await requestScriptJson('POST', scriptUrl, { action, ...payload });
   if (!result.ok) throw new Error(result.error || `Google Script action failed: ${action}`);
   return result;
 }
@@ -271,7 +296,13 @@ function getScriptUrl() {
 }
 
 function useGoogleScript() {
-  return !!getScriptUrl() && (!getEnv('GOOGLE_SERVICE_ACCOUNT_EMAIL') || !getEnv('GOOGLE_PRIVATE_KEY'));
+  const hasServiceAccount = !!(
+    getEnv('GOOGLE_SERVICE_ACCOUNT_EMAIL') &&
+    getEnv('GOOGLE_PRIVATE_KEY') &&
+    getEnv('GOOGLE_SHEET_ID')
+  );
+  if (hasServiceAccount) return false;
+  return !!getScriptUrl();
 }
 
 function sheetId() {
@@ -727,23 +758,30 @@ async function checkGoogleScript(req, res) {
   if (!scriptUrl) {
     return json(res, 200, { ok: false, error: 'GOOGLE_SCRIPT_URL is missing.' });
   }
+  const meta = {
+    scriptUrlLength: scriptUrl.length,
+    scriptUrlStart: scriptUrl.slice(0, 45),
+    scriptUrlEnd: scriptUrl.slice(-20)
+  };
   try {
-    const result = await requestUrlJson('POST', scriptUrl, { action: 'setupSheet', sheetHeaders: {}, sheetAliases: {} });
+    const getPing = await requestScriptJson('GET', scriptUrl);
+    let postResult = null;
+    let postError = '';
+    try {
+      postResult = await requestScriptJson('POST', scriptUrl, { action: 'setupSheet', sheetHeaders: {}, sheetAliases: {} });
+    } catch (error) {
+      postError = error.message;
+    }
+    const ok = !!(getPing && getPing.ok) && !!(postResult && postResult.ok);
     return json(res, 200, {
-      ok: true,
-      scriptUrlLength: scriptUrl.length,
-      scriptUrlStart: scriptUrl.slice(0, 45),
-      scriptUrlEnd: scriptUrl.slice(-20),
-      result
+      ok,
+      ...meta,
+      getPing,
+      postResult,
+      postError: postError || undefined
     });
   } catch (error) {
-    return json(res, 200, {
-      ok: false,
-      scriptUrlLength: scriptUrl.length,
-      scriptUrlStart: scriptUrl.slice(0, 45),
-      scriptUrlEnd: scriptUrl.slice(-20),
-      error: error.message
-    });
+    return json(res, 200, { ok: false, ...meta, error: error.message });
   }
 }
 
