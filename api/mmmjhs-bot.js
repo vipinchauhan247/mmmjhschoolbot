@@ -725,10 +725,16 @@ async function syncStudentFeesOnSheet(students, dryRun = false) {
   const items = Array.isArray(students) ? students : [];
   if (!items.length) return { updated: 0, results: [], error: 'No students provided.' };
 
+  if (useGoogleScript()) {
+    const result = await scriptRequest('syncStudentFees', { students: items, dryRun });
+    return { updated: Number(result.updated || 0), results: result.results || [] };
+  }
+
   const { headers, rows } = await getRows('Students');
   const studentHeaders = headers && headers.length ? headers : SHEET_HEADERS.Students;
   const results = [];
   let updated = 0;
+  const rowWrites = [];
 
   for (const patch of items) {
     const adm = normalizeAdmission(patch.AdmissionNo);
@@ -751,9 +757,22 @@ async function syncStudentFeesOnSheet(students, dryRun = false) {
       merged[key] = value;
     });
 
-    if (!dryRun) await updateRow('Students', match.index, studentHeaders, merged);
+    if (!dryRun) rowWrites.push({ rowIndex: match.index, values: rowFromMap(studentHeaders, merged) });
     results.push({ AdmissionNo: adm, ok: true, dryRun, rowIndex: match.index, changes });
     updated += 1;
+  }
+
+  if (!dryRun && rowWrites.length) {
+    const data = rowWrites.map(write => ({
+      range: `Students!A${write.rowIndex}:Z${write.rowIndex}`,
+      values: [write.values]
+    }));
+    for (let i = 0; i < data.length; i += 100) {
+      await sheetsRequest('POST', `/v4/spreadsheets/${sheetId()}/values:batchUpdate`, {
+        valueInputOption: 'USER_ENTERED',
+        data: data.slice(i, i + 100)
+      });
+    }
   }
 
   return { updated, results };
