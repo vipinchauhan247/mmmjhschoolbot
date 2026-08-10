@@ -125,11 +125,14 @@ function requestUrlJson(method, rawUrl, body, headers = {}, redirects = 0) {
   return new Promise((resolve, reject) => {
     const url = new URL(rawUrl);
     const payload = body ? JSON.stringify(body) : '';
+    const requestMethod = String(method || 'GET').toUpperCase();
     const req = https.request({
-      method,
+      method: requestMethod,
       hostname: url.hostname,
       path: `${url.pathname}${url.search}`,
       headers: {
+        'User-Agent': 'MMMJHSchoolBot/1.0',
+        'Accept': 'application/json,text/plain,*/*',
         ...headers,
         ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {})
       }
@@ -137,7 +140,9 @@ function requestUrlJson(method, rawUrl, body, headers = {}, redirects = 0) {
       if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location && redirects < 5) {
         response.resume();
         const nextUrl = new URL(response.headers.location, rawUrl).toString();
-        requestUrlJson(method, nextUrl, body, headers, redirects + 1).then(resolve).catch(reject);
+        const nextMethod = [301, 302, 303].includes(response.statusCode) ? 'GET' : requestMethod;
+        const nextBody = nextMethod === 'GET' ? null : body;
+        requestUrlJson(nextMethod, nextUrl, nextBody, headers, redirects + 1).then(resolve).catch(reject);
         return;
       }
       let data = '';
