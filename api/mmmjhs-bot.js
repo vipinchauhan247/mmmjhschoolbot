@@ -125,14 +125,11 @@ function requestUrlJson(method, rawUrl, body, headers = {}, redirects = 0) {
   return new Promise((resolve, reject) => {
     const url = new URL(rawUrl);
     const payload = body ? JSON.stringify(body) : '';
-    const requestMethod = String(method || 'GET').toUpperCase();
     const req = https.request({
-      method: requestMethod,
+      method,
       hostname: url.hostname,
       path: `${url.pathname}${url.search}`,
       headers: {
-        'User-Agent': 'MMMJHSchoolBot/1.0',
-        'Accept': 'application/json,text/plain,*/*',
         ...headers,
         ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {})
       }
@@ -140,9 +137,7 @@ function requestUrlJson(method, rawUrl, body, headers = {}, redirects = 0) {
       if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location && redirects < 5) {
         response.resume();
         const nextUrl = new URL(response.headers.location, rawUrl).toString();
-        const nextMethod = [301, 302, 303].includes(response.statusCode) ? 'GET' : requestMethod;
-        const nextBody = nextMethod === 'GET' ? null : body;
-        requestUrlJson(nextMethod, nextUrl, nextBody, headers, redirects + 1).then(resolve).catch(reject);
+        requestUrlJson(method, nextUrl, body, headers, redirects + 1).then(resolve).catch(reject);
         return;
       }
       let data = '';
@@ -261,19 +256,15 @@ async function sheetsRequest(method, path, body) {
 }
 
 async function scriptRequest(action, payload = {}) {
-  const scriptUrl = getScriptUrl();
+  const scriptUrl = getEnv('GOOGLE_SCRIPT_URL');
   if (!scriptUrl) throw new Error('GOOGLE_SCRIPT_URL is missing.');
   const result = await requestUrlJson('POST', scriptUrl, { action, ...payload });
   if (!result.ok) throw new Error(result.error || `Google Script action failed: ${action}`);
   return result;
 }
 
-function getScriptUrl() {
-  return String(getEnv('GOOGLE_SCRIPT_URL') || '').trim().replace(/\s+/g, '');
-}
-
 function useGoogleScript() {
-  return !!getScriptUrl() && (!getEnv('GOOGLE_SERVICE_ACCOUNT_EMAIL') || !getEnv('GOOGLE_PRIVATE_KEY'));
+  return !!getEnv('GOOGLE_SCRIPT_URL') && (!getEnv('GOOGLE_SERVICE_ACCOUNT_EMAIL') || !getEnv('GOOGLE_PRIVATE_KEY'));
 }
 
 function sheetId() {
@@ -586,7 +577,37 @@ async function handleTelegramUpdate(update) {
 
 async function getRegistrations() {
   const { rows } = await getRows('Registrations');
-  return rows.map(row => row.data);
+  const registrations = rows.map(row => row.data);
+  const seen = new Set(registrations.map(r => normalizeAdmission(r.AdmissionNo)));
+
+  // ERP sync reads Registrations; /link always updates Students first (Registrations can lag).
+  try {
+    const students = await getRows('Students');
+    students.rows.forEach(row => {
+      const s = row.data;
+      const adm = normalizeAdmission(s.AdmissionNo);
+      const chatId = String(s.SchoolBotChatId || '').trim();
+      if (!adm || !chatId || seen.has(adm)) return;
+      registrations.push({
+        DateTime: '',
+        AdmissionNo: s.AdmissionNo,
+        StudentName: s.StudentName,
+        Class: s.Class,
+        Section: s.Section,
+        ParentName: s.ParentName,
+        ParentPhone: s.ParentPhone,
+        SchoolBotChatId: chatId,
+        TelegramUserName: s.TelegramUserName || '',
+        LinkSource: 'Students tab',
+        Status: s.Status || 'Linked'
+      });
+      seen.add(adm);
+    });
+  } catch (error) {
+    console.error('Students fallback for registrations sync failed:', error.message);
+  }
+
+  return registrations;
 }
 
 async function logErpMessage(req, res) {
@@ -694,31 +715,6 @@ async function getTelegramChatInfo(req, res) {
   return json(res, 200, telegram);
 }
 
-async function checkGoogleScript(req, res) {
-  const scriptUrl = getScriptUrl();
-  if (!scriptUrl) {
-    return json(res, 200, { ok: false, error: 'GOOGLE_SCRIPT_URL is missing.' });
-  }
-  try {
-    const result = await requestUrlJson('POST', scriptUrl, { action: 'setupSheet', sheetHeaders: {}, sheetAliases: {} });
-    return json(res, 200, {
-      ok: true,
-      scriptUrlLength: scriptUrl.length,
-      scriptUrlStart: scriptUrl.slice(0, 45),
-      scriptUrlEnd: scriptUrl.slice(-20),
-      result
-    });
-  } catch (error) {
-    return json(res, 200, {
-      ok: false,
-      scriptUrlLength: scriptUrl.length,
-      scriptUrlStart: scriptUrl.slice(0, 45),
-      scriptUrlEnd: scriptUrl.slice(-20),
-      error: error.message
-    });
-  }
-}
-
 async function setupWebhook(req, res) {
   const secret = adminSecret();
   if (secret && req.query.secret !== secret) return json(res, 403, { ok: false, error: 'Forbidden' });
@@ -762,7 +758,6 @@ module.exports = async function handler(req, res) {
     if (req.method === 'GET') {
       if (req.query.action === 'setupWebhook') return setupWebhook(req, res);
       if (req.query.action === 'setupSheet') return setupSheet(req, res);
-      if (req.query.action === 'checkScript') return checkGoogleScript(req, res);
       if (req.query.action === 'registrations') return json(res, 200, { ok: true, registrations: await getRegistrations() });
       return json(res, 200, { ok: true, service: '@mmmjhschoolbot webhook' });
     }
