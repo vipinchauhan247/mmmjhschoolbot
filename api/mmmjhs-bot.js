@@ -256,15 +256,19 @@ async function sheetsRequest(method, path, body) {
 }
 
 async function scriptRequest(action, payload = {}) {
-  const scriptUrl = getEnv('GOOGLE_SCRIPT_URL');
+  const scriptUrl = getScriptUrl();
   if (!scriptUrl) throw new Error('GOOGLE_SCRIPT_URL is missing.');
   const result = await requestUrlJson('POST', scriptUrl, { action, ...payload });
   if (!result.ok) throw new Error(result.error || `Google Script action failed: ${action}`);
   return result;
 }
 
+function getScriptUrl() {
+  return String(getEnv('GOOGLE_SCRIPT_URL') || '').trim().replace(/\s+/g, '');
+}
+
 function useGoogleScript() {
-  return !!getEnv('GOOGLE_SCRIPT_URL') && (!getEnv('GOOGLE_SERVICE_ACCOUNT_EMAIL') || !getEnv('GOOGLE_PRIVATE_KEY'));
+  return !!getScriptUrl() && (!getEnv('GOOGLE_SERVICE_ACCOUNT_EMAIL') || !getEnv('GOOGLE_PRIVATE_KEY'));
 }
 
 function sheetId() {
@@ -685,6 +689,31 @@ async function getTelegramChatInfo(req, res) {
   return json(res, 200, telegram);
 }
 
+async function checkGoogleScript(req, res) {
+  const scriptUrl = getScriptUrl();
+  if (!scriptUrl) {
+    return json(res, 200, { ok: false, error: 'GOOGLE_SCRIPT_URL is missing.' });
+  }
+  try {
+    const result = await requestUrlJson('POST', scriptUrl, { action: 'setupSheet', sheetHeaders: {}, sheetAliases: {} });
+    return json(res, 200, {
+      ok: true,
+      scriptUrlLength: scriptUrl.length,
+      scriptUrlStart: scriptUrl.slice(0, 45),
+      scriptUrlEnd: scriptUrl.slice(-20),
+      result
+    });
+  } catch (error) {
+    return json(res, 200, {
+      ok: false,
+      scriptUrlLength: scriptUrl.length,
+      scriptUrlStart: scriptUrl.slice(0, 45),
+      scriptUrlEnd: scriptUrl.slice(-20),
+      error: error.message
+    });
+  }
+}
+
 async function setupWebhook(req, res) {
   const secret = adminSecret();
   if (secret && req.query.secret !== secret) return json(res, 403, { ok: false, error: 'Forbidden' });
@@ -728,6 +757,7 @@ module.exports = async function handler(req, res) {
     if (req.method === 'GET') {
       if (req.query.action === 'setupWebhook') return setupWebhook(req, res);
       if (req.query.action === 'setupSheet') return setupSheet(req, res);
+      if (req.query.action === 'checkScript') return checkGoogleScript(req, res);
       if (req.query.action === 'registrations') return json(res, 200, { ok: true, registrations: await getRegistrations() });
       return json(res, 200, { ok: true, service: '@mmmjhschoolbot webhook' });
     }
