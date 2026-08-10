@@ -719,6 +719,64 @@ async function getLinkedStudents() {
     }));
 }
 
+const FEE_SHEET_KEYS = ['DueMonths', 'TuitionDue', 'ExamFeeDue', 'ComputerFeeDue', 'AnnualFeeDue', 'PreviousSessionDue', 'TotalDue'];
+
+async function syncStudentFeesOnSheet(students, dryRun = false) {
+  const items = Array.isArray(students) ? students : [];
+  if (!items.length) return { updated: 0, results: [], error: 'No students provided.' };
+
+  const { headers, rows } = await getRows('Students');
+  const studentHeaders = headers && headers.length ? headers : SHEET_HEADERS.Students;
+  const results = [];
+  let updated = 0;
+
+  for (const patch of items) {
+    const adm = normalizeAdmission(patch.AdmissionNo);
+    if (!adm) {
+      results.push({ AdmissionNo: patch.AdmissionNo || '', ok: false, error: 'missing_admission' });
+      continue;
+    }
+    const match = rows.find(row => normalizeAdmission(row.data.AdmissionNo) === adm);
+    if (!match) {
+      results.push({ AdmissionNo: adm, ok: false, error: 'not_found_on_students_tab' });
+      continue;
+    }
+
+    const merged = { ...match.data };
+    const changes = {};
+    FEE_SHEET_KEYS.forEach(key => {
+      if (patch[key] === undefined) return;
+      const value = patch[key] === null ? '' : String(patch[key]);
+      changes[key] = value;
+      merged[key] = value;
+    });
+
+    if (!dryRun) await updateRow('Students', match.index, studentHeaders, merged);
+    results.push({ AdmissionNo: adm, ok: true, dryRun, rowIndex: match.index, changes });
+    updated += 1;
+  }
+
+  return { updated, results };
+}
+
+async function syncStudentFees(req, res) {
+  const body = req.body || {};
+  const dryRun = body.dryRun === true;
+  const students = Array.isArray(body.students) ? body.students : (body.AdmissionNo ? [body] : []);
+  if (!students.length) {
+    return json(res, 400, { ok: false, error: 'POST body must include students[] or a single AdmissionNo payload.' });
+  }
+  const result = await syncStudentFeesOnSheet(students, dryRun);
+  const missing = result.results.filter(r => !r.ok).length;
+  return json(res, 200, {
+    ok: true,
+    dryRun,
+    updated: result.updated,
+    missing,
+    results: result.results
+  });
+}
+
 async function logErpMessage(req, res) {
   const body = req.body || {};
   const type = String(body.type || '').trim();
@@ -909,6 +967,7 @@ module.exports = async function handler(req, res) {
     if (req.query.action === 'sendMessage') return sendErpTelegramMessage(req, res);
     if (req.query.action === 'getChat') return getTelegramChatInfo(req, res);
     if (req.query.action === 'logMessage') return logErpMessage(req, res);
+    if (req.query.action === 'syncStudentFees') return syncStudentFees(req, res);
     await handleTelegramUpdate(req.body || {});
     return json(res, 200, { ok: true });
   } catch (error) {
