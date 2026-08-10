@@ -360,14 +360,16 @@ async function updateRow(tab, rowIndex, headers, data) {
   });
 }
 
-async function appendRow(tab, values) {
+async function appendRow(tab, values, headerList) {
+  const headers = headerList && headerList.length ? headerList : (SHEET_HEADERS[tab] || []);
+  const rowValues = Array.isArray(values) ? values : rowFromMap(headers, values);
   if (useGoogleScript()) {
-    await scriptRequest('appendRow', { tab, aliases: SHEET_ALIASES[tab] || [tab], headers: SHEET_HEADERS[tab] || [], values });
+    await scriptRequest('appendRow', { tab, aliases: SHEET_ALIASES[tab] || [tab], headers, values: rowValues });
     return;
   }
   const range = encodeURIComponent(`${tab}!A:Z`);
   await sheetsRequest('POST', `/v4/spreadsheets/${sheetId()}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
-    values: [values]
+    values: [rowValues]
   });
 }
 
@@ -463,8 +465,10 @@ async function handleRegister(chatId, from, admissionNo, command) {
   student.Status = 'Linked';
   await updateRow('Students', studentRow.index, studentHeaders, student);
 
+  const now = new Date().toLocaleString('en-IN');
   const reg = {
-    DateTime: new Date().toLocaleString('en-IN'),
+    DateTime: now,
+    Timestamp: now,
     AdmissionNo: student.AdmissionNo,
     StudentName: student.StudentName,
     Class: student.Class,
@@ -479,9 +483,12 @@ async function handleRegister(chatId, from, admissionNo, command) {
 
   try {
     const registrations = await getRows('Registrations');
+    const regHeaders = registrations.headers && registrations.headers.length
+      ? registrations.headers
+      : SHEET_HEADERS.Registrations;
     const existing = registrations.rows.find(row => normalizeAdmission(row.data.AdmissionNo) === normalizeAdmission(admissionNo));
-    if (existing) await updateRow('Registrations', existing.index, registrations.headers, reg);
-    else await appendRow('Registrations', rowFromMap(SHEET_HEADERS.Registrations, reg));
+    if (existing) await updateRow('Registrations', existing.index, regHeaders, reg);
+    else await appendRow('Registrations', rowFromMap(regHeaders, reg), regHeaders);
   } catch (error) {
     console.error('Registration sheet update failed:', error.message);
   }
@@ -613,20 +620,68 @@ async function handleTelegramUpdate(update) {
   await sendTelegram(chatId, helpMessage(getTelegramName(from)));
 }
 
+function isLikelyChatId(value, admissionNo) {
+  const s = String(value || '').trim();
+  if (!/^\d{7,15}$/.test(s)) return false;
+  if (normalizeAdmission(s) === normalizeAdmission(admissionNo)) return false;
+  return true;
+}
+
+/** Registrations tab columns sometimes drift from bot headers — recover chat ID for ERP sync. */
+function normalizeRegistrationRow(row) {
+  const out = { ...(row || {}) };
+  let chatId = String(out.SchoolBotChatId || out.ChatId || '').trim();
+
+  if (!chatId && isLikelyChatId(out.ParentName, out.AdmissionNo)) {
+    chatId = String(out.ParentName).trim();
+    out.ParentName = '';
+  }
+
+  const statusStr = String(out.Status || '').trim();
+  const extraStatus = String(out[''] || '').trim();
+  if (statusStr.includes('Telegram /')) {
+    out.LinkSource = out.LinkSource || statusStr;
+    out.Status = extraStatus || 'Linked';
+  } else if (!out.Status && extraStatus) {
+    out.Status = extraStatus;
+  }
+
+  if (!out.DateTime && out.Timestamp) out.DateTime = out.Timestamp;
+  out.SchoolBotChatId = chatId;
+  return out;
+}
+
 async function getRegistrations() {
   const { rows } = await getRows('Registrations');
-  const registrations = rows.map(row => row.data);
-  const seen = new Set(registrations.map(r => normalizeAdmission(r.AdmissionNo)));
+  const registrations = rows.map(row => normalizeRegistrationRow(row.data));
+  const byAdmission = new Map();
+  registrations.forEach(r => {
+    const adm = normalizeAdmission(r.AdmissionNo);
+    if (adm) byAdmission.set(adm, r);
+  });
 
-  // ERP sync reads Registrations; /link always updates Students first (Registrations can lag).
+  // ERP sync reads Registrations; /link always updates Students first (Registrations can lag or misalign).
   try {
     const students = await getRows('Students');
     students.rows.forEach(row => {
       const s = row.data;
       const adm = normalizeAdmission(s.AdmissionNo);
       const chatId = String(s.SchoolBotChatId || '').trim();
-      if (!adm || !chatId || seen.has(adm)) return;
-      registrations.push({
+      if (!adm || !chatId) return;
+
+      if (byAdmission.has(adm)) {
+        const existing = byAdmission.get(adm);
+        if (!String(existing.SchoolBotChatId || '').trim()) {
+          existing.SchoolBotChatId = chatId;
+          existing.TelegramUserName = existing.TelegramUserName || s.TelegramUserName || '';
+          if (!existing.Status || String(existing.Status).includes('Telegram /')) {
+            existing.Status = 'Linked';
+          }
+        }
+        return;
+      }
+
+      registrations.push(normalizeRegistrationRow({
         DateTime: '',
         AdmissionNo: s.AdmissionNo,
         StudentName: s.StudentName,
@@ -638,14 +693,30 @@ async function getRegistrations() {
         TelegramUserName: s.TelegramUserName || '',
         LinkSource: 'Students tab',
         Status: s.Status || 'Linked'
-      });
-      seen.add(adm);
+      }));
+      byAdmission.set(adm, registrations[registrations.length - 1]);
     });
   } catch (error) {
     console.error('Students fallback for registrations sync failed:', error.message);
   }
 
   return registrations;
+}
+
+async function getLinkedStudents() {
+  const { rows } = await getRows('Students');
+  return rows
+    .map(row => row.data)
+    .filter(s => String(s.SchoolBotChatId || '').trim())
+    .map(s => ({
+      AdmissionNo: s.AdmissionNo,
+      StudentName: s.StudentName,
+      Class: s.Class,
+      Section: s.Section,
+      SchoolBotChatId: String(s.SchoolBotChatId).trim(),
+      TelegramUserName: s.TelegramUserName || '',
+      Status: s.Status || 'Linked'
+    }));
 }
 
 async function logErpMessage(req, res) {
@@ -830,6 +901,7 @@ module.exports = async function handler(req, res) {
       if (req.query.action === 'setupSheet') return setupSheet(req, res);
       if (req.query.action === 'checkScript') return checkGoogleScript(req, res);
       if (req.query.action === 'registrations') return json(res, 200, { ok: true, registrations: await getRegistrations() });
+      if (req.query.action === 'linkedStudents') return json(res, 200, { ok: true, students: await getLinkedStudents() });
       return json(res, 200, { ok: true, service: '@mmmjhschoolbot webhook' });
     }
 
