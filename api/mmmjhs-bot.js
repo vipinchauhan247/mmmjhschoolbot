@@ -39,7 +39,7 @@ const SHEET_HEADERS = {
 };
 
 const SHEET_ALIASES = {
-  Students: ['student', 'Student', 'Students', 'Students Record', 'Student Record', 'Student Records'],
+  Students: ['Students', 'Students Record', 'Student Record', 'Student Records', 'Student', 'student'],
   Registrations: ['Registrations', 'Registration'],
   Fee_Due_Messages: ['Fee_Due_Messages', 'Fee Due Messages'],
   Fee_Receipt_Messages: ['Fee_Receipt_Messages', 'Fee Receipt Messages', 'Fee_Receipts'],
@@ -94,7 +94,19 @@ function json(res, status, body) {
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.end(JSON.stringify(body));
+}
+
+function empty(res, status = 204) {
+  res.statusCode = status;
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.end();
 }
 
 function normalizeHeaderName(header) {
@@ -654,6 +666,25 @@ async function logErpMessage(req, res) {
   return json(res, 400, { ok: false, error: 'Unknown log type.' });
 }
 
+async function sendErpTelegramMessage(req, res) {
+  const body = req.body || {};
+  const chatId = String(body.chatId || body.SchoolBotChatId || '').trim();
+  const text = String(body.text || body.message || '').trim();
+  if (!chatId || !text) {
+    return json(res, 400, { ok: false, error: 'chatId and text are required.' });
+  }
+  const telegram = await sendTelegram(chatId, text);
+  return json(res, 200, { ok: telegram?.ok !== false, telegram });
+}
+
+async function getTelegramChatInfo(req, res) {
+  const chatId = String(req.body?.chatId || req.query.chatId || '').trim();
+  if (!chatId) return json(res, 400, { ok: false, error: 'chatId is required.' });
+  const token = botToken();
+  const telegram = await requestJson('GET', 'api.telegram.org', `/bot${token}/getChat?chat_id=${encodeURIComponent(chatId)}`);
+  return json(res, 200, telegram);
+}
+
 async function setupWebhook(req, res) {
   const secret = adminSecret();
   if (secret && req.query.secret !== secret) return json(res, 403, { ok: false, error: 'Forbidden' });
@@ -692,6 +723,8 @@ async function setupSheet(req, res) {
 
 module.exports = async function handler(req, res) {
   try {
+    if (req.method === 'OPTIONS') return empty(res);
+
     if (req.method === 'GET') {
       if (req.query.action === 'setupWebhook') return setupWebhook(req, res);
       if (req.query.action === 'setupSheet') return setupSheet(req, res);
@@ -700,6 +733,8 @@ module.exports = async function handler(req, res) {
     }
 
     if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'Method not allowed' });
+    if (req.query.action === 'sendMessage') return sendErpTelegramMessage(req, res);
+    if (req.query.action === 'getChat') return getTelegramChatInfo(req, res);
     if (req.query.action === 'logMessage') return logErpMessage(req, res);
     await handleTelegramUpdate(req.body || {});
     return json(res, 200, { ok: true });
