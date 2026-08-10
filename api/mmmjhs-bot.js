@@ -39,7 +39,7 @@ const SHEET_HEADERS = {
 };
 
 const SHEET_ALIASES = {
-  Students: ['Students', 'Students Record', 'Student Record', 'Student Records'],
+  Students: ['student', 'Student', 'Students', 'Students Record', 'Student Record', 'Student Records'],
   Registrations: ['Registrations', 'Registration'],
   Fee_Due_Messages: ['Fee_Due_Messages', 'Fee Due Messages'],
   Fee_Receipt_Messages: ['Fee_Receipt_Messages', 'Fee Receipt Messages', 'Fee_Receipts'],
@@ -132,6 +132,10 @@ function requestUrlJson(method, rawUrl, body, headers = {}, redirects = 0) {
       response.on('data', chunk => data += chunk);
       response.on('end', () => {
         try {
+          if (/^\s*</.test(data || '')) {
+            reject(new Error('GOOGLE_SCRIPT_URL returned an HTML page, not JSON. Use the Apps Script Web App URL ending in /exec and set access to Anyone.'));
+            return;
+          }
           resolve(data ? JSON.parse(data) : {});
         } catch (error) {
           reject(error);
