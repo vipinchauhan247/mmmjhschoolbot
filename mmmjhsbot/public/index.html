@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MMM Jr High School — ERP & Telegram Bot Portal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="main-header">
+      <div class="header-left">
+        <div class="logo-circle">🏫</div>
+        <div>
+          <h1>Madan Mohan Malviya Junior High School</h1>
+          <p class="subtitle">School Management ERP & Parent Telegram Portal (@mmmjhschoolbot)</p>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="status-badge" id="botStatusBadge">
+          <span class="status-dot green"></span> @mmmjhschoolbot Webhook
+        </div>
+        <button class="btn btn-secondary" onclick="refreshData()">🔄 Refresh Data</button>
+      </div>
+    </header>
+
+    <!-- Navigation Tabs -->
+    <nav class="nav-tabs">
+      <button class="tab-btn active" onclick="switchTab('students')">👥 Students & Fee Dues</button>
+      <button class="tab-btn" onclick="switchTab('registrations')">📋 Bot Registrations</button>
+      <button class="tab-btn" onclick="switchTab('notices')">📢 Send Parent Notices</button>
+      <button class="tab-btn" onclick="switchTab('setup')">⚙️ Webhook & Sheet Setup</button>
+    </nav>
+
+    <!-- Main Content Area -->
+    <main class="content-body">
+      
+      <!-- TAB 1: STUDENTS & FEE DUES -->
+      <section id="tab-students" class="tab-content active">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>Student Records & Fee Dues</h2>
+              <p>Synced directly from Google Sheet (<code>Students</code> tab)</p>
+            </div>
+            <div class="search-box">
+              <input type="text" id="studentSearch" placeholder="Search name or admission no..." oninput="filterStudents()">
+            </div>
+          </div>
+
+          <div class="table-responsive">
+            <table class="data-table" id="studentsTable">
+              <thead>
+                <tr>
+                  <th>Adm No</th>
+                  <th>Student Name</th>
+                  <th>Class</th>
+                  <th>Parent Name</th>
+                  <th>Phone</th>
+                  <th>Bot Status</th>
+                  <th>Total Due</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="studentsTbody">
+                <tr>
+                  <td colspan="8" class="loading-cell">Loading student records...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: BOT REGISTRATIONS -->
+      <section id="tab-registrations" class="tab-content">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>Telegram Bot Registrations</h2>
+              <p>Parent accounts linked via <code>/register</code> command (@mmmjhschoolbot)</p>
+            </div>
+            <button class="btn btn-primary" onclick="loadRegistrations()">🔄 Sync Registrations</button>
+          </div>
+
+          <div class="table-responsive">
+            <table class="data-table" id="registrationsTable">
+              <thead>
+                <tr>
+                  <th>Timestamp</th>
+                  <th>Adm No</th>
+                  <th>Student Name</th>
+                  <th>Class</th>
+                  <th>Telegram Username</th>
+                  <th>Chat ID</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="registrationsTbody">
+                <tr>
+                  <td colspan="7" class="loading-cell">Loading registrations...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 3: SEND NOTICES -->
+      <section id="tab-notices" class="tab-content">
+        <div class="card">
+          <div class="card-header">
+            <h2>Send Instant Telegram Notice to Parent</h2>
+          </div>
+          <div class="form-container">
+            <div class="form-group">
+              <label for="noticeChatId">Parent Telegram Chat ID *</label>
+              <input type="text" id="noticeChatId" placeholder="e.g. 123456789 (Or select student below)">
+            </div>
+            <div class="form-group">
+              <label for="noticeStudentSelect">Select Linked Student (Optional)</label>
+              <select id="noticeStudentSelect" onchange="onSelectNoticeStudent()">
+                <option value="">-- Choose Student --</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="noticeTitle">Notice Title / Subject *</label>
+              <input type="text" id="noticeTitle" placeholder="e.g. Fee Due Reminder / Exam Time Table">
+            </div>
+            <div class="form-group">
+              <label for="noticeMessage">Notice Body *</label>
+              <textarea id="noticeMessage" rows="5" placeholder="Type your message to the parent..."></textarea>
+            </div>
+            <button class="btn btn-primary" onclick="sendNotice()">🚀 Send Notice via @mmmjhschoolbot</button>
+            <div id="noticeAlert" class="alert-box" style="display: none;"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 4: SETUP & DIAGNOSTICS -->
+      <section id="tab-setup" class="tab-content">
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header">
+              <h2>1. Telegram Webhook Configuration</h2>
+            </div>
+            <p>Connect <b>@mmmjhschoolbot</b> webhook to this Render backend service for 24/7 automated replies.</p>
+            <br>
+            <div class="form-group">
+              <label>Current Webhook Status:</label>
+              <pre class="code-block" id="webhookInfoJson">Checking webhook status...</pre>
+            </div>
+            <button class="btn btn-primary" onclick="setWebhookAuto()">⚡ Activate Webhook Now</button>
+            <button class="btn btn-secondary" onclick="checkWebhookInfo()">🔍 Check Webhook Info</button>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h2>2. Google Sheet Initializer</h2>
+            </div>
+            <p>Automatically verify & create all <b>7 required tabs</b> with headers in your Google Sheet.</p>
+            <br>
+            <ul class="sheet-tabs-list">
+              <li>✅ <code>Students</code></li>
+              <li>✅ <code>Registrations</code></li>
+              <li>✅ <code>Fee_Due_Messages</code></li>
+              <li>✅ <code>Fee_Receipt_Messages</code></li>
+              <li>✅ <code>School_Messages</code></li>
+              <li>✅ <code>Exam_Schedule_Messages</code></li>
+              <li>✅ <code>Bot_Events</code></li>
+            </ul>
+            <br>
+            <button class="btn btn-primary" onclick="initGoogleSheetTabs()">📊 Initialize / Fix Google Sheet Tabs</button>
+            <div id="initSheetAlert" class="alert-box" style="display: none; margin-top: 15px;"></div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+
+    <footer class="main-footer">
+      <p>Madan Mohan Malviya Junior High School ERP &bull; Connected Bot: <strong>@mmmjhschoolbot</strong> &bull; Note: <em>@vipinbellbot operates separately for NFC hardware</em></p>
+    </footer>
+  </div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>
