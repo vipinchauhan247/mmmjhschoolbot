@@ -428,6 +428,30 @@ async function sendTelegram(chatId, text) {
   });
 }
 
+async function sendTelegramDocument(chatId, buffer, filename, caption, mimeType = 'application/pdf') {
+  const token = botToken();
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  const file = typeof File !== 'undefined'
+    ? new File([buffer], filename, { type: mimeType })
+    : new Blob([buffer], { type: mimeType });
+  form.append('document', file, filename);
+  if (caption) {
+    form.append('caption', String(caption).slice(0, 1024));
+    form.append('parse_mode', 'Markdown');
+  }
+  const response = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
+    method: 'POST',
+    body: form
+  });
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Telegram sendDocument failed: ${text.slice(0, 200)}`);
+  }
+}
+
 function findStudentMatches(students, admissionNo) {
   const clean = normalizeAdmission(admissionNo);
   return students.filter(item => normalizeAdmission(item.data.AdmissionNo) === clean);
@@ -893,6 +917,31 @@ async function sendErpTelegramMessage(req, res) {
   return json(res, 200, { ok: telegram?.ok !== false, telegram });
 }
 
+async function sendErpTelegramDocument(req, res) {
+  const body = req.body || {};
+  const chatId = String(body.chatId || body.SchoolBotChatId || '').trim();
+  const filename = String(body.filename || 'document.pdf').trim() || 'document.pdf';
+  const caption = String(body.caption || '').trim();
+  const mimeType = String(body.mimeType || 'application/pdf').trim() || 'application/pdf';
+  const documentBase64 = String(body.documentBase64 || '').trim();
+  if (!chatId || !documentBase64) {
+    return json(res, 400, { ok: false, error: 'chatId and documentBase64 are required.' });
+  }
+  const buffer = Buffer.from(documentBase64, 'base64');
+  if (!buffer.length) {
+    return json(res, 400, { ok: false, error: 'documentBase64 is empty or invalid.' });
+  }
+  const telegram = await sendTelegramDocument(chatId, buffer, filename, caption, mimeType);
+  if (telegram?.ok === false) {
+    return json(res, 200, {
+      ok: false,
+      error: telegram.description || 'Telegram rejected the document.',
+      telegram
+    });
+  }
+  return json(res, 200, { ok: true, telegram });
+}
+
 async function getTelegramChatInfo(req, res) {
   const chatId = String(req.body?.chatId || req.query.chatId || '').trim();
   if (!chatId) return json(res, 400, { ok: false, error: 'chatId is required.' });
@@ -984,6 +1033,7 @@ module.exports = async function handler(req, res) {
 
     if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'Method not allowed' });
     if (req.query.action === 'sendMessage') return sendErpTelegramMessage(req, res);
+    if (req.query.action === 'sendDocument') return sendErpTelegramDocument(req, res);
     if (req.query.action === 'getChat') return getTelegramChatInfo(req, res);
     if (req.query.action === 'logMessage') return logErpMessage(req, res);
     if (req.query.action === 'syncStudentFees') return syncStudentFees(req, res);
